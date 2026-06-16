@@ -1,4 +1,4 @@
-# PNJ AI Trend Radar V2
+# AI Trend Radar V2
 
 Ứng dụng Streamlit để phân tích feedback khách hàng PNJ, hiển thị sentiment, xu hướng, tín hiệu yếu và báo cáo khuyến nghị từ AI.
 

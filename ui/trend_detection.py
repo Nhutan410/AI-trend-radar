@@ -19,6 +19,7 @@ import plotly.express as px
 import pandas as pd
 
 from core.trend_engine import TrendEngineOutput, WeakSignal
+from core import llm_synthesis
 
 SEVERITY_CONFIG = {
     "high":   {"emoji": "🔴", "color": "#E05C6E", "label": "NGHIÊM TRỌNG",  "bg": "rgba(224,92,110,0.15)"},
@@ -50,12 +51,21 @@ def render(engine_output: TrendEngineOutput) -> None:
         medium  = [s for s in signals if s.severity == "medium"]
         low     = [s for s in signals if s.severity == "low"]
 
+        # Cache LLM reasons for all signals
+        sig_cache_key = "signal_reasons_" + str(
+            hash(tuple(s.signal_id + s.description for s in signals))
+        )
+        if sig_cache_key not in st.session_state:
+            with st.spinner("🤖 Đang phân tích lý do tín hiệu..."):
+                st.session_state[sig_cache_key] = llm_synthesis.generate_weak_signal_reasons(signals)
+        signal_reasons: dict = st.session_state.get(sig_cache_key, {})
+
         for group_name, group_signals in [("🔴 Nghiêm trọng", high), ("🟡 Cần chú ý", medium), ("🟢 Theo dõi", low)]:
             if not group_signals:
                 continue
             st.markdown(f"**{group_name}** ({len(group_signals)} tín hiệu)")
             for sig in group_signals:
-                _render_signal_card(sig)
+                _render_signal_card(sig, signal_reasons.get(sig.signal_id, ""))
             st.markdown("")
 
     st.markdown("---")
@@ -146,11 +156,38 @@ def render(engine_output: TrendEngineOutput) -> None:
         st.info("Không có tín hiệu xu hướng được trích xuất.")
     else:
         st.caption(f"Phát hiện **{len(trending_texts)}** tín hiệu xu hướng từ khách hàng")
-        for item in trending_texts:
+
+        # Cache LLM reasons per unique set of signal texts
+        cache_key = "trend_reasons_" + str(
+            hash(tuple(sorted(t.get("signal_text", "") for t in trending_texts)))
+        )
+        if cache_key not in st.session_state:
+            with st.spinner("🤖 Đang phân tích lý do tín hiệu xu hướng..."):
+                st.session_state[cache_key] = llm_synthesis.generate_trend_signal_reasons(
+                    trending_texts
+                )
+
+        enriched = st.session_state.get(cache_key, trending_texts)
+
+        for item in enriched:
             with st.container():
                 cols = st.columns([3, 1, 1])
                 with cols[0]:
                     st.markdown(f"💬 *{item.get('signal_text', '')}*")
+                    reason = item.get("llm_reason", "")
+                    if reason:
+                        st.markdown(
+                            f"<div style='"
+                            "font-size:12px;"
+                            "color:rgba(212,175,55,0.9);"
+                            "background:rgba(212,175,55,0.07);"
+                            "border-left:3px solid rgba(212,175,55,0.5);"
+                            "border-radius:4px;"
+                            "padding:6px 10px;"
+                            "margin-top:6px;"
+                            f"'>🤖 <b>Lý do xu hướng:</b> {reason}</div>",
+                            unsafe_allow_html=True,
+                        )
                 with cols[1]:
                     st.caption(f"📅 {item.get('Ngày', '')}")
                 with cols[2]:
@@ -163,35 +200,46 @@ def render(engine_output: TrendEngineOutput) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _render_signal_card(sig: WeakSignal) -> None:
+def _render_signal_card(sig: WeakSignal, llm_reason: str = "") -> None:
     """Render a single signal as a styled card."""
     cfg = SEVERITY_CONFIG.get(sig.severity, SEVERITY_CONFIG["low"])
     emoji = cfg["emoji"]
     label = cfg["label"]
 
+    reason_html = (
+        f"<div style='"
+        "font-size:12px;"
+        "color:rgba(212,175,55,0.9);"
+        "background:rgba(212,175,55,0.07);"
+        "border-left:3px solid rgba(212,175,55,0.5);"
+        "border-radius:4px;"
+        "padding:6px 10px;"
+        "margin-top:8px;"
+        f"'>🤖 <b>Phân tích lý do:</b> {llm_reason}</div>"
+        if llm_reason else ""
+    )
+
+    evidence_html = (
+        (lambda opinions, desc: (
+            "<div style='font-size:12px; margin-top:6px; color: rgba(255,255,255,0.6);'>Bằng chứng: "
+            + " | ".join(f'"{o}"' for o in opinions[:2])
+            + "</div>"
+        ) if opinions and any(o not in desc for o in opinions[:2]) else ""
+        )(sig.sample_opinions, sig.description)
+    )
+
     with st.container():
-        st.markdown(
-            f"""
-            <div style="
-                border-left: 4px solid {cfg['color']};
-                background: {cfg['bg']};
-                border-radius: 8px;
-                padding: 12px 16px;
-                margin-bottom: 8px;
-            ">
-                <div style="font-weight:600; font-size:15px;">{emoji} {sig.title}
-                    <span style="float:right; font-size:11px; color:{cfg['color']}; font-weight:bold;">
-                        {label} · Score: {sig.score:.2f}
-                    </span>
-                </div>
-                <div style="font-size:13px; margin-top:4px; color: rgba(255,255,255,0.85);">
-                    {sig.description}
-                </div>
-                {"<div style='font-size:12px; margin-top:6px; color: rgba(255,255,255,0.6);'>Bằng chứng: " + " | ".join(f'"{o}"' for o in sig.sample_opinions[:2]) + "</div>" if sig.sample_opinions else ""}
-            </div>
-            """,
-            unsafe_allow_html=True,
+        card_html = (
+            f"<div style='border-left:4px solid {cfg['color']};background:{cfg['bg']};border-radius:8px;padding:12px 16px;margin-bottom:8px;'>"
+            f"<div style='font-weight:600;font-size:15px;'>{emoji} {sig.title}"
+            f"<span style='float:right;font-size:11px;color:{cfg['color']};font-weight:bold;'>{label} · Score: {sig.score:.2f}</span>"
+            f"</div>"
+            f"<div style='font-size:13px;margin-top:4px;color:rgba(255,255,255,0.85);'>{sig.description}</div>"
+            f"{evidence_html}"
+            f"{reason_html}"
+            f"</div>"
         )
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:

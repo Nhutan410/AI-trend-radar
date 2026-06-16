@@ -6,7 +6,7 @@ Trend Detection Engine for PNJ feedback data.
 Performs:
 1. Time-Series Analysis     – rolling sentiment ratio, velocity, weekly patterns
 2. Weak Signal Detection    – Z-score spike detection, emerging topics
-3. Complaint Pattern        – top issues, recurrence rate, NPS proxy
+3. Complaint Pattern        – top issues, recurrence rate, NPS
 4. Store/Channel Analysis   – cross-store comparison, systemic issue detection
 """
 

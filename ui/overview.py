@@ -4,7 +4,7 @@ ui/overview.py
 Streamlit Tab 1: Tổng quan (Overview Dashboard)
 
 Shows:
-- KPI metric cards (total feedbacks, NPS proxy, pos/neg ratio, trending signals)
+- KPI metric cards (total feedbacks, NPS, pos/neg ratio, trending signals)
 - Sentiment distribution donut chart
 - Category breakdown bar chart
 - Feedback volume heatmap (hour x day-of-week)
@@ -61,7 +61,7 @@ def render(engine_output: TrendEngineOutput, quick_summary: str | None = None) -
     with c2:
         nps = stats["nps_proxy"]
         st.metric(
-            "🎯 NPS Proxy",
+            "🎯 NPS",
             f"{nps:+.1f}",
             delta=None,
             help="(Tích cực - Tiêu cực) / Tổng × 100. Thang điểm -100 → +100",
@@ -191,7 +191,7 @@ def render(engine_output: TrendEngineOutput, quick_summary: str | None = None) -
             st.plotly_chart(fig_hm, use_container_width=True)
 
     with col_stores:
-        st.markdown("#### 🏪 Top 10 cửa hàng – NPS Proxy")
+        st.markdown("#### 🏪 Top 10 cửa hàng – NPS")
         store_df = engine_output.store_performance
         if not store_df.empty:
             top_stores = store_df.head(10).copy()
@@ -210,7 +210,7 @@ def render(engine_output: TrendEngineOutput, quick_summary: str | None = None) -
                 )
             )
             fig_stores.update_layout(
-                xaxis_title="NPS Proxy Score",
+                xaxis_title="NPS Score",
                 yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
                 margin=dict(t=10, b=30, l=10, r=40),
                 paper_bgcolor="rgba(0,0,0,0)",

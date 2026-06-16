@@ -34,5 +34,8 @@ build/
 # ── Jupyter ──────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+
 # ── NOTE: PNJ_ABSA_Result.json and PNJ_Feedback.xlsx ARE committed intentionally
 # so the app works out-of-the-box on a new machine without needing to run ABSA first.

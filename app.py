@@ -15,19 +15,23 @@ Architecture:
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import sys
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 # ── Ensure project root is on sys.path ───────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+load_dotenv(ROOT / ".env", override=False)
 
-from core import ingestion, absa_pipeline, trend_engine
+from core import ingestion, absa_pipeline, trend_engine, llm_provider
 from ui import overview, sentiment_analysis, trend_detection, recommendations
 
 # ---------------------------------------------------------------------------
@@ -49,7 +53,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        "About": "PNJ AI Trend Radar V2 – Powered by Qwen2.5:7b & Streamlit",
+        "About": "PNJ AI Trend Radar V2 – Powered by OpenAI & Streamlit",
     },
 )
 
@@ -171,6 +175,7 @@ st.markdown(
 # ---------------------------------------------------------------------------
 def _init_session() -> None:
     defaults = {
+        "authenticated": False,
         "df_flat":       None,   # flat ABSA DataFrame
         "engine_output": None,   # TrendEngineOutput
         "quick_summary": None,   # quick LLM summary string
@@ -181,6 +186,56 @@ def _init_session() -> None:
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
+
+def _constant_time_equal(left: str, right: str) -> bool:
+    """Compare credentials without leaking timing hints."""
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _render_login() -> bool:
+    """Render a simple login gate backed by AUTH_USERNAME/AUTH_PASSWORD."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    expected_username = os.getenv("AUTH_USERNAME", "").strip()
+    expected_password = os.getenv("AUTH_PASSWORD", "")
+
+    col_left, col_mid, col_right = st.columns([1, 1.1, 1])
+    with col_mid:
+        st.markdown(
+            """
+            <div style="text-align:center; padding: 72px 0 20px 0;">
+                <div style="font-size: 40px;">💎</div>
+                <h1 style="font-size: 2rem; margin: 8px 0 4px 0; color: #D4AF37;">
+                    PNJ AI Trend Radar
+                </h1>
+                <p style="color: rgba(255,255,255,0.58); margin: 0;">
+                    Đăng nhập để vào dashboard
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if not expected_username or not expected_password:
+            st.error("Thiếu AUTH_USERNAME hoặc AUTH_PASSWORD trong .env.")
+            return False
+
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("Đăng nhập", use_container_width=True)
+
+        if submitted:
+            user_ok = _constant_time_equal(username.strip(), expected_username)
+            password_ok = _constant_time_equal(password, expected_password)
+            if user_ok and password_ok:
+                st.session_state.authenticated = True
+                st.rerun()
+            st.error("Username hoặc password không đúng.")
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -239,24 +294,27 @@ def render_sidebar() -> None:
                     PNJ AI Trend Radar
                 </div>
                 <div style="font-size: 12px; color: rgba(255,255,255,0.5);">
-                    Powered by Qwen2.5:7b
+                    Powered by OpenAI
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        if st.button("Đăng xuất", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
 
         st.markdown("---")
 
         # ── Data Update Section ──────────────────────────────────────────────
         st.markdown("### 🔄 Cập nhật dữ liệu")
 
-        # Check Ollama status
-        ollama_ok, ollama_msg = absa_pipeline.check_ollama_available()
-        if ollama_ok:
-            st.success(ollama_msg, icon="✅")
+        # Check LLM backend status
+        llm_ok, llm_msg = llm_provider.check_llm_available()
+        if llm_ok:
+            st.success(llm_msg, icon="✅")
         else:
-            st.warning(ollama_msg, icon="⚠️")
+            st.warning(llm_msg, icon="⚠️")
 
         # Check new rows
         try:
@@ -278,11 +336,11 @@ def render_sidebar() -> None:
 
         update_btn = st.button(
             f"⚡ Xử lý {n_new} feedback mới" if n_new > 0 else "✓ Không có gì mới",
-            disabled=(n_new == 0 or not ollama_ok or st.session_state.processing),
+            disabled=(n_new == 0 or not llm_ok or st.session_state.processing),
             use_container_width=True,
         )
 
-        if update_btn and n_new > 0 and ollama_ok:
+        if update_btn and n_new > 0 and llm_ok:
             _run_absa_pipeline(new_rows, json_data)
 
         st.markdown("---")
@@ -359,7 +417,7 @@ def render_sidebar() -> None:
             st.caption(f"📝 {stats['total_feedbacks']:,} feedbacks")
             st.caption(f"✅ {stats['positive_ratio']}% tích cực")
             st.caption(f"❌ {stats['negative_ratio']}% tiêu cực")
-            st.caption(f"🎯 NPS Proxy: {stats['nps_proxy']:+.1f}")
+            st.caption(f"🎯 NPS: {stats['nps_proxy']:+.1f}")
 
 
 def _clear_cache():
@@ -401,6 +459,9 @@ def _run_absa_pipeline(new_rows: pd.DataFrame, json_data: list) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     _init_session()
+    if not _render_login():
+        return
+
     render_sidebar()
 
     # ── Header ────────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ Streamlit Tab 4: Khuyến nghị & Hành động (AI Recommendations)
 
 Shows:
 - "Generate AI Report" button → calls LLM synthesis
-- Rendered markdown report from Qwen
+- Rendered markdown report
 - Priority matrix scatter (Impact vs Effort)
 - Export report as markdown file
 """
@@ -30,14 +30,15 @@ def render(engine_output: TrendEngineOutput) -> None:
     if "quick_summary" not in st.session_state:
         st.session_state.quick_summary = None
 
-    # ── Ollama status check ───────────────────────────────────────────────────
-    from core.absa_pipeline import check_ollama_available
-    ollama_ok, ollama_msg = check_ollama_available()
+    # ── LLM backend status check ──────────────────────────────────────────────
+    from core.llm_provider import check_llm_available, get_active_provider
+    llm_ok, llm_msg = check_llm_available()
+    provider = get_active_provider()
 
-    if ollama_ok:
-        st.success(ollama_msg)
+    if llm_ok:
+        st.success(llm_msg)
     else:
-        st.error(ollama_msg)
+        st.error(llm_msg)
 
     st.markdown("---")
 
@@ -53,7 +54,7 @@ def render(engine_output: TrendEngineOutput) -> None:
         medium_signals = len([s for s in signals if s.severity == "medium"])
         st.metric("🟡 Cần chú ý", medium_signals)
     with col_c:
-        st.metric("📉 NPS Proxy hiện tại", f"{stats.get('nps_proxy', 0):+.1f}")
+        st.metric("📉 NPS hiện tại", f"{stats.get('nps_proxy', 0):+.1f}")
 
     st.markdown("---")
 
@@ -136,13 +137,16 @@ def render(engine_output: TrendEngineOutput) -> None:
 
     # ── AI Report Button ──────────────────────────────────────────────────────
     col_btn, col_clear = st.columns([1, 1])
+    model_label = {
+        "openai": "GPT-4o-mini (OpenAI)",
+    }.get(provider, "LLM")
     with col_btn:
         generate_btn = st.button(
             "🤖 Tạo Báo Cáo AI Đầy Đủ",
             type="primary",
-            disabled=not ollama_ok,
+            disabled=not llm_ok,
             use_container_width=True,
-            help="Gọi Qwen2.5:7b để tổng hợp insight và đề xuất hành động (~30-60s)",
+            help=f"Gọi {model_label} để tổng hợp insight và đề xuất hành động (~30-60s)",
         )
     with col_clear:
         if st.button("🗑️ Xoá báo cáo", use_container_width=True):
@@ -150,7 +154,7 @@ def render(engine_output: TrendEngineOutput) -> None:
             st.rerun()
 
     if generate_btn:
-        with st.spinner("⏳ Qwen đang tổng hợp báo cáo... (30-60 giây)"):
+        with st.spinner(f"⏳ {model_label} đang tổng hợp báo cáo... (30-60 giây)"):
             from core.llm_synthesis import generate_synthesis
             report = generate_synthesis(engine_output)
             st.session_state.ai_report = report

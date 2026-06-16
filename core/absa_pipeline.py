@@ -1,11 +1,9 @@
 """
 core/absa_pipeline.py
 ---------------------
-Aspect-Based Sentiment Analysis (ABSA) pipeline using Qwen2.5:7b
-served locally through Ollama (http://localhost:11434).
+Aspect-Based Sentiment Analysis (ABSA) pipeline.
 
-The prompt is derived from the structure already produced by Qwen
-in PNJ_ABSA_Result.json, ensuring consistent schema extraction.
+Uses the OpenAI provider configured in core/llm_provider.py.
 """
 
 from __future__ import annotations
@@ -15,22 +13,19 @@ import logging
 import time
 from typing import Any, Callable
 
-import requests
+from . import llm_provider
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Ollama configuration
+# Provider configuration
 # ---------------------------------------------------------------------------
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:7b"
-OLLAMA_TIMEOUT = 120  # seconds per request
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
 
 # ---------------------------------------------------------------------------
-# ABSA Prompt (engineered from existing Qwen output in the JSON file)
+# ABSA Prompt
 # ---------------------------------------------------------------------------
 ABSA_SYSTEM_PROMPT = """Bạn là hệ thống Aspect-Based Sentiment Analysis (ABSA) chuyên nghiệp cho dữ liệu feedback khách hàng PNJ bằng tiếng Việt.
 
@@ -71,31 +66,13 @@ Trả về JSON theo đúng schema này:
 # Core extraction function
 # ---------------------------------------------------------------------------
 
-def _call_ollama(prompt_messages: list[dict]) -> str:
-    """
-    Call Ollama chat endpoint and return the raw text response.
-
-    Uses /api/chat with message list for better instruction following.
-    """
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": prompt_messages,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,   # Low temp for consistent JSON output
-            "top_p": 0.9,
-            "num_predict": 1024,
-        },
-    }
-
-    response = requests.post(
-        f"{OLLAMA_BASE_URL}/api/chat",
-        json=payload,
-        timeout=OLLAMA_TIMEOUT,
+def _call_absa_model(prompt_messages: list[dict]) -> str:
+    """Call active LLM backend and return raw text response."""
+    return llm_provider.call_llm(
+        prompt_messages,
+        temperature=0.1,   # low temp for consistent JSON output
+        max_tokens=1024,
     )
-    response.raise_for_status()
-    result = response.json()
-    return result["message"]["content"].strip()
 
 
 def _parse_absa_response(raw_text: str) -> dict[str, Any]:
@@ -160,7 +137,7 @@ def _parse_absa_response(raw_text: str) -> dict[str, Any]:
 
 def extract_absa(feedback_text: str) -> dict[str, Any]:
     """
-    Extract ABSA result for a single feedback text via Qwen2.5:7b.
+    Extract ABSA result for a single feedback text.
 
     Retries up to MAX_RETRIES times on transient errors.
 
@@ -184,14 +161,9 @@ def extract_absa(feedback_text: str) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            raw = _call_ollama(messages)
+            raw = _call_absa_model(messages)
             result = _parse_absa_response(raw)
             return result
-        except requests.exceptions.ConnectionError as e:
-            last_error = e
-            logger.error("Không kết nối được Ollama (attempt %d/%d): %s", attempt, MAX_RETRIES, e)
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY)
         except json.JSONDecodeError as e:
             last_error = e
             logger.warning("JSON parse lỗi (attempt %d/%d): %s", attempt, MAX_RETRIES, e)
@@ -268,27 +240,12 @@ def process_batch(
     return json_data
 
 
-def check_ollama_available() -> tuple[bool, str]:
+def check_llm_available() -> tuple[bool, str]:
     """
-    Check if Ollama is running and qwen2.5:7b model is available.
+    Check if the configured LLM backend is available.
 
     Returns
     -------
     (is_available: bool, message: str)
     """
-    try:
-        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
-        resp.raise_for_status()
-        models = [m["name"] for m in resp.json().get("models", [])]
-        if any(OLLAMA_MODEL in m for m in models):
-            return True, f"✅ Ollama sẵn sàng · Model: {OLLAMA_MODEL}"
-        else:
-            available = ", ".join(models) if models else "không có model nào"
-            return (
-                False,
-                f"⚠️ Model '{OLLAMA_MODEL}' chưa được pull. Các model có sẵn: {available}",
-            )
-    except requests.exceptions.ConnectionError:
-        return False, f"❌ Không kết nối được Ollama tại {OLLAMA_BASE_URL}. Hãy chạy: ollama serve"
-    except Exception as e:
-        return False, f"❌ Lỗi kiểm tra Ollama: {e}"
+    return llm_provider.check_llm_available()

@@ -2,19 +2,16 @@
 core/llm_synthesis.py
 ---------------------
 LLM-powered synthesis layer: takes structured Trend Engine output
-and generates human-readable insights + actionable recommendations
-via Qwen2.5:7b through Ollama.
+and generates human-readable insights + actionable recommendations.
+
+Uses the OpenAI provider configured in core/llm_provider.py.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
 
-import requests
-
-from .absa_pipeline import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
+from . import llm_provider
 from .trend_engine import TrendEngineOutput
 
 logger = logging.getLogger(__name__)
@@ -37,7 +34,7 @@ SYNTHESIS_USER_TEMPLATE = """Dữ liệu phân tích từ {total_feedbacks} feed
 
 ## Tổng quan sentiment
 - Tích cực: {positive_ratio}% | Tiêu cực: {negative_ratio}% | Trung lập: {neutral_ratio}%
-- NPS Proxy Score: {nps_proxy}
+- NPS Score: {nps_proxy}
 - Tín hiệu xu hướng phát hiện: {trending_count}
 
 ## Vấn đề hàng đầu theo danh mục
@@ -78,7 +75,7 @@ def generate_synthesis(engine_output: TrendEngineOutput) -> str:
 
     Returns
     -------
-    str – Markdown-formatted synthesis report from Qwen
+    str – Markdown-formatted synthesis report
     """
     stats = engine_output.summary_stats
 
@@ -109,6 +106,10 @@ def generate_synthesis(engine_output: TrendEngineOutput) -> str:
     trending_texts = "\n".join(trend_lines) or "Không có tín hiệu xu hướng"
 
     # ── Build prompt ──────────────────────────────────────────────────
+    # Escape curly braces in user data to prevent str.format() misinterpretation
+    def _esc(s: str) -> str:
+        return s.replace("{", "{{").replace("}", "}}")
+
     user_prompt = SYNTHESIS_USER_TEMPLATE.format(
         total_feedbacks=stats.get("total_feedbacks", 0),
         date_start=stats.get("date_range_start", "N/A"),
@@ -118,9 +119,9 @@ def generate_synthesis(engine_output: TrendEngineOutput) -> str:
         neutral_ratio=stats.get("neutral_ratio", 0),
         nps_proxy=stats.get("nps_proxy", 0),
         trending_count=stats.get("trending_signals_count", 0),
-        top_complaints_text=top_complaints_text,
-        weak_signals_text=weak_signals_text,
-        trending_texts=trending_texts,
+        top_complaints_text=_esc(top_complaints_text),
+        weak_signals_text=_esc(weak_signals_text),
+        trending_texts=_esc(trending_texts),
     )
 
     messages = [
@@ -129,32 +130,119 @@ def generate_synthesis(engine_output: TrendEngineOutput) -> str:
     ]
 
     try:
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "top_p": 0.95,
-                "num_predict": 2048,
-            },
-        }
-        resp = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT * 2,  # synthesis takes longer
-        )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"].strip()
-
-    except requests.exceptions.ConnectionError:
-        return (
-            "❌ **Không kết nối được Ollama.** "
-            "Hãy đảm bảo Ollama đang chạy: `ollama serve`"
+        return llm_provider.call_llm(
+            messages,
+            temperature=0.3,
+            max_tokens=2048,
+            timeout=llm_provider.LLM_TIMEOUT * 2,  # synthesis takes longer
         )
     except Exception as e:
         logger.error("Synthesis error: %s", e)
         return f"❌ **Lỗi tạo báo cáo:** {e}"
+
+
+def generate_weak_signal_reasons(signals: list) -> dict:
+    """
+    Generate a short LLM explanation for each weak signal.
+
+    Returns
+    -------
+    dict[signal_id, str] – one-sentence reason per signal
+    """
+    if not signals:
+        return {}
+
+    lines = []
+    for sig in signals:
+        lines.append(
+            f"- {sig.signal_id} | [{sig.severity.upper()}] {sig.title}: {sig.description} "
+            f"(danh mục: {sig.category}, bằng chứng: {sig.evidence_count} trường hợp)"
+        )
+    signals_text = "\n".join(lines)
+
+    prompt = (
+        "Bạn là chuyên gia CX của PNJ. Dưới đây là các tín hiệu yếu phát hiện từ feedback khách hàng:\n\n"
+        f"{signals_text}\n\n"
+        "Với mỗi tín hiệu, hãy viết 1–2 câu giải thích ngắn gọn TẠI SAO đây là vấn đề đáng chú ý "
+        "và tác động tiềm năng đến PNJ. Trả lời theo định dạng:\n"
+        "<signal_id>: <giải thích>\n"
+        "Ví dụ:\nSIG-001: Khách hàng liên tục phản ánh...\nSIG-002: Xu hướng này cho thấy..."
+    )
+
+    try:
+        raw = llm_provider.call_llm(
+            [{"role": "user", "content": prompt}],
+            temperature=0.25,
+            max_tokens=512,
+            timeout=90,
+        )
+        result: dict = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if ":" in line:
+                sid, _, reason = line.partition(":")
+                sid = sid.strip()
+                if sid.startswith("SIG-"):
+                    result[sid] = reason.strip()
+        return result
+    except Exception as e:
+        logger.warning("generate_weak_signal_reasons error: %s", e)
+        return {}
+
+
+def generate_trend_signal_reasons(trending_texts: list[dict]) -> list[dict]:
+    """
+    Enrich each trending text dict with an LLM-generated reason.
+
+    Parameters
+    ----------
+    trending_texts : list of dicts with 'signal_text', 'Ngày', 'Cửa hàng', etc.
+
+    Returns
+    -------
+    Same list with 'llm_reason' key added to each dict.
+    """
+    if not trending_texts:
+        return trending_texts
+
+    lines = [f"{i + 1}. {t.get('signal_text', '')}" for i, t in enumerate(trending_texts)]
+    texts = "\n".join(lines)
+
+    prompt = (
+        "Bạn là chuyên gia CX của PNJ. Dưới đây là các tín hiệu xu hướng từ feedback khách hàng:\n\n"
+        f"{texts}\n\n"
+        "Với mỗi tín hiệu, hãy viết 1-2 câu giải thích ngắn gọn tại sao đây là xu hướng đáng chú ý "
+        "và tác động tiềm năng đến PNJ. Trả lời theo định dạng:\n"
+        "1: <giải thích>\n"
+        "2: <giải thích>\n"
+        "..."
+    )
+
+    try:
+        raw = llm_provider.call_llm(
+            [{"role": "user", "content": prompt}],
+            temperature=0.25,
+            max_tokens=512,
+            timeout=90,
+        )
+        reasons: dict[int, str] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if line and ":" in line:
+                num, _, reason = line.partition(":")
+                num = num.strip()
+                if num.isdigit():
+                    reasons[int(num) - 1] = reason.strip()
+
+        result = []
+        for i, t in enumerate(trending_texts):
+            enriched = t.copy()
+            enriched["llm_reason"] = reasons.get(i, "")
+            result.append(enriched)
+        return result
+    except Exception as e:
+        logger.warning("generate_trend_signal_reasons error: %s", e)
+        return trending_texts
 
 
 def generate_quick_summary(engine_output: TrendEngineOutput) -> str:
@@ -183,31 +271,24 @@ def generate_quick_summary(engine_output: TrendEngineOutput) -> str:
         f"Tóm tắt ngắn gọn (3 câu) tình hình feedback PNJ: "
         f"{stats['total_feedbacks']} feedback, "
         f"tích cực {stats['positive_ratio']}%, tiêu cực {stats['negative_ratio']}%, "
-        f"NPS proxy {stats['nps_proxy']}. "
+        f"NPS {stats['nps_proxy']}. "
         f"Danh mục nhiều khiếu nại nhất: {top_neg_cat}. "
         f"{signal_text} "
         f"Trả lời bằng tiếng Việt, súc tích."
     )
 
     try:
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "options": {"temperature": 0.2, "num_predict": 256},
-        }
-        resp = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
+        return llm_provider.call_llm(
+            [{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=256,
             timeout=60,
         )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"].strip()
     except Exception as e:
         logger.warning("Quick summary error: %s", e)
         return (
             f"📊 Tổng cộng **{stats['total_feedbacks']}** feedback được phân tích. "
             f"Sentiment: {stats['positive_ratio']}% tích cực, "
             f"{stats['negative_ratio']}% tiêu cực. "
-            f"NPS Proxy: **{stats['nps_proxy']}**."
+            f"NPS: **{stats['nps_proxy']}**."
         )
